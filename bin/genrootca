@@ -1,0 +1,88 @@
+#!/bin/sh
+
+if [ -e etc/config ]; then
+	. etc/config
+else
+	echo "[ERROR] Config file not found. You must execute this script as ./bin/genrootca" >&2
+	exit 1
+fi
+
+# Creating structure
+if [ ! -d $CABASE ]; then
+	mkdir -p $CABASE
+	mkdir -p $CABASE/ca.db.certs
+	echo "01" > $CABASE/ca.db.serial
+	touch $CABASE/ca.db.index
+	echo "* CA hierarcy created"
+fi
+
+# Create the master CA key. This should be done once.
+if [ ! -f $CABASE/ca.key ]; then
+	openssl genrsa -des3 -out $CABASE/ca.key 2048 -rand random-bits
+	if [ $? -eq 0 ]; then
+		echo "* CA private key generated: $CABASE/ca.key"
+	else
+		echo "[ERROR] Openssl failed to generate key" >&2
+		exit 1
+	fi
+else
+	echo "[ERROR] CA key already exists in $CABASE/ca.key" >&2
+	exit 1
+fi
+
+chmod 0400 $CABASE/ca.key
+if [ $? -ne 0 ]; then
+	echo "[WARNING] Failed to restrict access to ca.key" >&2
+else
+	echo "* Restrictive access to key has been set"
+fi
+	
+# Self-sign it.
+CONFIG="root-ca.conf"
+cat >$CONFIG <<EOT
+[ req ]
+default_bits				= 2048
+default_keyfile			= ca.key
+distinguished_name	= req_distinguished_name
+x509_extensions			= v3_ca
+string_mask					= nombstr
+req_extensions			= v3_req
+
+[ req_distinguished_name ]
+countryName											= Country Name (2 letter code)
+countryName_default							= $CA_C
+countryName_min									= 2
+countryName_max									= 2
+stateOrProvinceName							= State or Province Name (full name)
+stateOrProvinceName_default			= $CA_ST
+localityName										= Locality Name (eg, city)
+localityName_default						= $CA_L
+0.organizationName							= Organization Name (eg, company)
+0.organizationName_default			=	$CA_O
+organizationalUnitName					= Organizational Unit Name (eg, section)
+organizationalUnitName_default	= $CA_OU
+commonName											= Common Name (eg, MD Root CA)
+commonName_default							= $CA_CN
+commonName_max									= 64
+emailAddress										= Email Address
+emailAddress_default						= $CA_E
+emailAddress_max								= 40
+
+[ v3_ca ]
+basicConstraints								= critical,CA:true
+subjectKeyIdentifier						= hash
+
+[ v3_req ]
+nsCertType											= objsign,email,server
+EOT
+
+openssl req -new -x509 -days $CA_VALID -config $CONFIG -key $CABASE/ca.key -out $CABASE/ca.crt
+if [ $? -eq 0 ]; then
+	echo "* CA certificated created $CABASE/ca.crt"
+else
+	echo "[ERROR] Openssl failed to generate certificate" >&2
+	exit 1
+fi
+
+rm -f $CONFIG
+

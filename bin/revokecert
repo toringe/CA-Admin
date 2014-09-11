@@ -1,0 +1,168 @@
+#!/bin/bash
+
+set -e
+
+if [ -e etc/config ]; then
+  . etc/config
+else
+  echo "[ERROR] Config file not found. You must execute this script as ./bin/genservercert" >&2
+  exit 1
+fi
+
+CRL_DAYS=$CRL_VALID
+
+function usage
+{
+	cat <<-EOF
+	`basename $0` will revoke TLS/SSL user certificates signed by ./ca/ca.crt
+	
+	Certificates to revoke are *.crt files, that you may have 
+	archieved in any directory. Without arguments this script generates 
+	only the revokation list (ca.crl).
+	
+	============
+	The CRL will expire in $CRL_DAYS days (default) and lock all access to your server!!
+	============
+	
+	openssl will modify ca/ca.db.index and look up the name and modify a 
+	V line to an R line. The certificate itself will be untouched.
+	
+	Example (choose one option):
+	`basename $0` -p CA_PASSWORD -l 750 (create CRL valid for 750 days)
+	`basename $0` -p CA_PASSWORD -d DIRECTORY (confirmation)
+	`basename $0` -p CA_PASSWORD -c single-certificate
+	`basename $0` -p CA_PASSWORD -e emailOf@certificate.owner (confirmation - egrep search)
+	`basename $0` -p CA_PASSWORD -e emailOf@certificate.owner (confirmation - egrep search)
+	
+	All revoked certificates in the whole CA are collected in ca.crl which has 
+	to be copied to ALL webservers.
+	EOF
+}
+
+# The directory that hods the CA database, ca.crt and ca.key
+CADB_DIR=$CABASE
+CADB_CRTS=$CADB_DIR/ca.db.certs/
+# Exit if anything goes wrong
+set -e
+
+CRT=""
+DIR=""
+EMAIL=""
+
+while getopts c:d:p:e:l:h OPT; do
+    case $OPT in
+        d) DIR=$OPTARG;;
+        c) CRT=$OPTARG;;
+		e) EMAIL=$OPTARG;;
+        p) capassword=$OPTARG;;
+        l) CRL_DAYS=$OPTARG;;
+		h) usage; exit 2;;
+        *) echo unrecognized option: $OPT; usage; exit 2;;
+    esac
+done
+
+#  create the CA requirement to sign the cert
+cat >ca.config <<EOT
+[ ca ]
+default_ca              = default_CA
+[ default_CA ]
+dir                     = $CADB_DIR
+certs                   = \$dir
+new_certs_dir           = \$dir/ca.db.certs
+database                = \$dir/ca.db.index
+serial                  = \$dir/ca.db.serial
+RANDFILE                = \$dir/random-bits
+certificate             = \$dir/ca.crt
+private_key             = \$dir/ca.key
+default_days            = 730
+default_crl_days        = 30
+default_md              = sha1
+preserve                = yes
+x509_extensions		= user_cert
+policy                  = policy_anything
+email_in_dn		= yes
+[ policy_anything ]
+commonName              = supplied
+emailAddress            = supplied
+O                       = supplied
+OU                      = supplied
+C                       = supplied
+ST                      = supplied
+L                       = supplied
+[ user_cert ]
+#SXNetID		= 3:yeak
+subjectAltName		= email:copy
+basicConstraints	= critical,CA:false
+authorityKeyIdentifier	= keyid:always
+extendedKeyUsage	= clientAuth,emailProtection
+EOT
+
+if [ "$DIR" != "" ] ; then
+	n=0
+	for cert in $DIR/*.crt ; do
+		echo "Found: ${cert##*/}"
+		let n=n+1
+	done
+	
+	echo -n "CONFIRM with y to revoke all $n: "
+	read input
+	
+	if [ "$input" != "y" ] ; then
+		echo "Not confirmed! exiting!";
+		exit -1
+	fi
+
+	for cert in $DIR/*.crt ; do
+		echo "Revoking: $cert"
+		openssl ca -config ca.config -passin "pass:$capassword" -revoke $cert
+	done
+fi
+
+if [ "$CRT" != "" ] ; then
+	echo "Revoking: $CRT"
+	openssl ca -config ca.config -passin "pass:$capassword" -revoke $CRT
+	if [ $? -ne 0 ]; then
+		echo "[ERROR] Openssl failed to revoke $CRT" >&2
+		exit 1
+	fi
+fi
+
+if [ "$EMAIL" != "" ] ; then
+	CNR=`egrep "V.*$EMAIL" <$CADB_DIR/ca.db.index | awk " { print \\$3 }"`
+	
+	for cert in $CNR ; do
+		echo
+		echo "Revoking: $EMAIL -> $cert.pem"
+		echo -n "RETURN to revoke Ctrl-C to stop s to skip:"
+		read input
+		if [ "$input" == "s" -o "$input" == "S" ] ; then
+			echo "SKIPPED!";
+			continue;
+		fi
+		openssl ca -config ca.config -passin "pass:$capassword" -revoke $CADB_CRTS/$cert.pem
+	done
+	
+	exit
+fi
+
+openssl ca -config ca.config -passin "pass:$capassword" -gencrl -crldays $CRL_DAYS -out $CABASE/ca.crl
+if [ $? -ne 0 ]; then
+	echo "[ERROR] Openssl failed to create CRL" >&2
+	exit 1
+else
+	echo "CRL created $CABASE/ca.crl"
+fi
+
+openssl crl -text -noout -in $CABASE/ca.crl -out $CABASE/ca.crl.txt
+if [ $? -ne 0 ]; then
+	echo "[WARNING] Openssl failed to create text version of CRL" >&2
+fi
+
+openssl crl -in $CABASE/ca.crl -outform DER -out $CABASE/ca.crl.der
+if [ $? -ne 0 ]; then
+	echo "[WARNING] Openssl failed to create DER formatted CRL" >&2
+fi
+
+#  cleanup after SSLeay 
+rm -f ca.config
+

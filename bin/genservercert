@@ -1,0 +1,221 @@
+#!/bin/bash
+
+if [ -e etc/config ]; then
+  . etc/config
+else
+  echo "[ERROR] Config file not found. You must execute this script as ./bin/genservercert" >&2
+  exit 1
+fi
+
+
+function usage
+{
+	cat <<-EOF
+	`basename $0` will generate a TLS/SSL server certificate signed by ./ca/ca.crt with
+	the distinguished name: DN=CN/emailAddress/O/OU/C/ST/L. This certificate can be used 
+	for Apache to provide TLS/SSL encryption.
+	
+	WARNING: provided passwords may be visible to other users that are currently 
+	logged in at this computer (ps). Run in single user mode or disconnect network.
+	
+	Before running this script you need to have or create a self-signed 
+	Certificate Authority certificate with the name ca.crt and ca.key
+	
+	Defaults can be modified by editing this script.
+	HINT: .crt files are the same as .pem files.
+	
+	Example (minimal - uses defaults of script and full):
+	`basename $0` -C tlsserver.acme.com -e "intranet@acme.com" -p "secret-CA-password"
+	`basename $0` -C tlsserver.acme.com -e "intranet@acme.com" -p "secret-CA-password" -o "Acme Holding" -u "Acme IT" -c US -s TN -l Nashville
+	
+	These options are recognized:		Default:
+
+	-C 	Common Name (CN) NO-SPACES!	$CN
+	-e 	full email address of admin	$email
+	-p	CA master password		********
+	-N	comment				$comment
+	-c	country (two letters, e.g. DE)	$C
+	-s	state (ST)			$ST
+	-l 	city (L)			$L
+	-o 	organisation (O)		$O
+	-u 	organisational unit (OU)	$U
+	-d      days user cert is valid for	$days
+	-h      show usage
+	EOF
+}
+
+# The directory that hods the CA database, ca.crt and ca.key
+CADB_DIR=$CABASE
+
+# Exit if anything goes wrong
+set -e
+
+test -t && { BRIGHT='[01m'; RED='[31m'; NORMAL='[00m'; }
+function myecho { echo $BRIGHT$@$NORMAL; }
+function error  { echo $RED$@$NORMAL; }
+function myexit { error something ugly seems to have happened in line $1...; exit $2; }
+
+##########################################
+# ADD YOUR DEFAULTS HERE (C,ST,L) ...
+##########################################
+# defaults
+	comment="TLS/SSL server certificate"
+        C=$CA_C
+        ST=$CA_ST
+        L=$CA_L
+        U=$CA_OU
+	O=$CA_O
+	days=$SC_VALID
+	CERT=user
+
+while getopts C:N:c:s:l:o:u:n:e:p:dh OPT; do
+    case $OPT in
+        C) CN=$OPTARG;;
+        N) comment=$OPTARG;;
+	p) capassword=$OPTARG;;
+        c) C=$OPTARG;;
+        s) ST=$OPTARG;;
+        l) L=$OPTARG;;
+        u) U=$OPTARG;;
+        o) O=$OPTARG;;
+        e) email=$OPTARG;;
+	d) days=$OPTARG;;
+	h) usage; exit 2;;
+        *) echo unrecognized option: $OPT; usage; exit 2;;
+    esac
+done
+
+if [[ $CN == "" || $email == "" || $capassword == "" ]]; then
+	echo "*** ERROR: CommonName (CN), full admin email-address, and CA password required (-C -e -p)!"
+	echo ""
+	usage; exit 2;
+fi
+
+GO_LEFT="\033[80D"
+GO_MIDDLE="$GO_LEFT\033[15C"
+for i in comment CN email C ST L U O days; do 
+	eval "echo -e $i\"$GO_MIDDLE\" \$$i;"
+done
+
+############ END OF SUSE SCRIPT #################
+############ ssl-ca: new-server-cert #############
+
+#   make sure environment exists
+if [ ! -d $CADB_DIR/ca.db.certs ]; then
+    mkdir $CADB_DIR/ca.db.certs
+fi
+if [ ! -f $CADB_DIR/ca.db.serial ]; then
+    echo '01' >$CADB_DIR/ca.db.serial
+fi
+if [ ! -f $CADB_DIR/ca.db.index ]; then
+    cp /dev/null $CADB_DIR/ca.db.index
+fi
+
+echo ""
+echo "-=| REQUEST (key and csr) |=----------------------------------------------------"
+echo ""
+
+CONFIG="server-cert.conf"
+cat >$CONFIG <<EOT
+[ req ]
+default_bits			= 1024
+default_keyfile			= server.key
+distinguished_name		= req_distinguished_name
+string_mask			= nombstr
+req_extensions			= v3_req
+[ req_distinguished_name ]
+CN                     = supplied
+emailAddress           = supplied
+O                      = supplied
+OU                     = supplied
+C                      = supplied
+ST                     = supplied
+L                      = supplied
+[ v3_req ]
+nsCertType			= server
+basicConstraints		= critical,CA:false
+EOT
+
+#make the certificate file name the CN of the server
+CERT=$CN
+
+# do we have a key??
+if [ ! -f $CERT.key ]; then
+	echo "No $CERT.key round. Generating one"
+	openssl genrsa -out $CERT.key 2048
+	echo ""
+fi
+
+# This is the distinguished name (DN) of the subject
+SUBJECT_DN="/CN=$CN/emailAddress=$email/O=$O/OU=$U/C=$C/ST=$ST/L=$L"
+
+# create certificate
+echo "Fill in certificate data for $SUBJECT_DN ..."
+openssl req -new -config $CONFIG -subj "$SUBJECT_DN" -key $CERT.key -out $CERT.csr
+
+rm -f $CONFIG
+
+############ ssl-ca: sign-user-cert #############
+echo ""
+echo "-=| SIGNING (crt) |=------------------------------------------------------------"
+echo ""
+
+#  create the CA requirement to sign the cert
+cat >ca.config <<EOT
+[ ca ]
+default_ca              = default_CA
+[ default_CA ]
+dir                     = $CADB_DIR
+certs                   = \$dir
+new_certs_dir           = \$dir/ca.db.certs
+database                = \$dir/ca.db.index
+serial                  = \$dir/ca.db.serial
+RANDFILE                = \$dir/random-bits
+certificate             = \$dir/ca.crt
+private_key             = \$dir/ca.key
+default_days            = $SC_VALID
+default_crl_days        = 30
+default_md              = sha512
+preserve                = no
+x509_extensions		= server_cert
+policy                  = policy_anything
+email_in_dn		= yes
+[ policy_anything ]
+CN              	= supplied
+emailAddress           	= supplied
+O                       = supplied
+OU                      = supplied
+C                       = supplied
+ST                      = supplied
+L                       = supplied
+[ server_cert ]
+#subjectKeyIdentifier	= hash
+authorityKeyIdentifier	= keyid:always
+extendedKeyUsage	= serverAuth,clientAuth,msSGC,nsSGC
+basicConstraints	= critical,CA:false
+EOT
+
+#  sign the certificate
+echo "CA signing: $CERT.csr -> $CERT.crt:"
+openssl ca -batch -passin "pass:$capassword" -config ca.config -out $CERT.crt -infiles $CERT.csr 
+
+echo "CA verifying: $CERT.crt <-> CA cert"
+openssl verify -CAfile $CADB_DIR/ca.crt $CERT.crt
+
+openssl x509 -in $CERT.crt -out $CERT.der -outform DER
+if [ $? -ne 0 ]; then
+	echo "[WARNING] Openssl failed to convert CRT to DER" >&2
+else
+	openssl x509 -in $CERT.der -inform DER -out $CERT.pem -outform PEM
+	if [ $? -ne 0 ]; then
+		echo "[WARNING] Openssl failed to convert DER to PEM" >&2
+	fi
+fi
+
+#  cleanup after SSLeay 
+rm -f ca.config
+
+echo ""
+echo "The certificate for $CERT has been signed."
+echo "You can download to your server's certificate directory and install it."
+echo "Alternatively cou can discard the self signed .crt and submit the .csr to a public CA for signing."

@@ -1,0 +1,7 @@
+********************************************************************************
+ Use the script wrapper "CA-admin" instead of executing these scripts directly.
+********************************************************************************
+
+The scripts in the bin directory are all based on the openssl-ca scripts.
+http://sourceforge.net/projects/openssl-ca/
+Credit: katzlbt@gmail.com

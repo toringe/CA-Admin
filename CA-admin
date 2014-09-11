@@ -1,0 +1,577 @@
+#!/bin/bash
+################################################################################
+#
+# Certificate Authority Administration - Wrapper Script
+# -----------------------------------------------------
+#
+# Author: Tor Inge Skaar (tor.inge.skaar at gmail)
+#
+################################################################################
+
+me=`basename $0`
+ossl=`which openssl`
+if [ $? -ne 0 ]; then
+	echo "[ERROR] Failed to locate openssl. Unable to proceed" >&2
+	exit 1
+fi
+
+if [ ! -e etc/config ]; then
+	echo "[ERROR] Configuration not found in ./etc/config" >&2
+	exit 1
+else
+	. etc/config
+fi
+
+printusage() {
+	cat <<EOF
+
+CERTIFICATE AUTHORITY ADMINISTRATION
+
+Usage: CA-admin <command>
+--------------------------------------------------------------------------------
+Commands:
+
+ init   - Initialize the Certificate Authority by creating key, cert, directory 
+          structure, index and serial files.
+
+ new    - Create new certificate. This command has two sub-commands: server (for
+          generating a server certificate) and client (client certificate).
+
+ list   - List certificates issued by this CA. Use sub-command to display 
+          servers, clients or all certificates.
+
+ show   - Display details for given certificate.
+
+ revoke - Revoke a certificate and update the CRL.
+
+ crl    - Certificate Revocation List (CRL) specific sub-commands: show (display
+          ascii contents of current CRL), generate (create an updated CRL), 
+          publish (copy CRL to CRL_PUB_{DER|PEM} as specified in etc/config).
+
+--------------------------------------------------------------------------------
+
+For commands requiring sub-commands, write help or nothing at all to display
+command usage (e.g. CA-admin new help).
+ 
+EOF
+	exit 1
+}
+
+#
+# Create temporary openssl config
+#
+tmpconf() {
+	cat >ca.config <<EOT
+[ ca ]
+default_ca              = default_CA
+[ default_CA ]
+dir                     = $CABASE
+certs                   = \$dir
+new_certs_dir           = \$dir/ca.db.certs
+database                = \$dir/ca.db.index
+serial                  = \$dir/ca.db.serial
+RANDFILE                = \$dir/random-bits
+certificate             = \$dir/ca.crt
+private_key             = \$dir/ca.key
+default_days            = 730
+default_crl_days        = 30
+default_md              = sha1
+preserve                = yes
+x509_extensions         = user_cert
+policy                  = policy_anything
+email_in_dn             = yes
+[ policy_anything ]
+commonName              = supplied
+emailAddress            = supplied
+O                       = supplied
+OU                      = supplied
+C                       = supplied
+ST                      = supplied
+L                       = supplied
+[ user_cert ]
+#SXNetID                = 3:yeak
+subjectAltName          = email:copy
+basicConstraints        = critical,CA:false
+authorityKeyIdentifier  = keyid:always
+extendedKeyUsage        = clientAuth,emailProtection
+EOT
+
+	if [ ! -r ca.config ]; then
+		echo "[ERROR] Failed to create temporary config" >&2
+		exit 1
+	fi
+}
+
+#
+# Remove temporary openssl config
+#
+rmconf() {
+	if [ -e ca.config ]; then
+		rm -f ca.config
+		if [ $? -ne 0 ]; then
+			echo "[WARNING] Failed to remove temporary config (ca.config)" >&2
+		fi
+	fi
+}
+
+#
+# Initialize the CA
+#
+init() {
+	if [ -e $CABASE/ca.key ]; then
+		# Private CA key detected. Display warning.
+		echo "Please confirm that you do indeed want to initialize the certificate"
+		echo "authority. A CA private key was found at $CABASE/ca.key, and if you"
+		echo "choose to proceed, everything in this directory (`pwd`)"
+		echo -n "will be deleted. Do you wish to proceed? [yes/NO]: "
+		read input
+		if [ "$input" != "yes" ]; then
+			exit 1;
+		fi
+	
+		# Purge directory
+		if [ -d $CABASE ]; then
+			rm -rf $CABASE/
+		fi
+	fi
+
+	./bin/genrootca
+
+	exit 0
+}
+
+#
+# New certificate
+#
+newcert() {
+	if [ ! -e $CABASE/ca.key ]; then
+		echo "[ERROR] No CA key found." >&2
+    echo "If you haven't initialized the certificate authority yet, then" >&2
+    echo "you have to run \"$me init\" first." >&2
+    exit 1
+  fi
+
+	CTYPE=`echo $1 | tr [:upper:] [:lower:]`"s"
+  if [ "$CTYPE" != "servers" -a "$CTYPE" != "clients" ]; then
+    echo -e "\n"$me" new { server | client } \n" >&2
+    exit 1
+  fi
+
+	if [ "$CTYPE" = "servers" ]; then
+
+		# New server certificate
+		
+		echo ""
+		echo "The name of the server must be either its fully qualified"
+    echo "domain name (FQDN) or its IP-address."
+    read -p "SERVER NAME: " cname
+    if [ `echo $cname | egrep -c "^[^ ]*$"` -eq 0 ]; then
+      echo "[ERROR] Invalid name" >&2
+      exit 1
+    fi
+		if [ -e $SCBASE/$cname/$cname.key ]; then
+			echo "[ERROR] This server exists in CA hierarchy already" >&2
+			exit 1
+		fi 
+		echo ""
+		echo "What is the e-mail address of the administrative contact"
+		echo "for the server $cname?"
+		read -p "EMAIL: " email
+		if [ -z "$email" ]; then 
+			echo "[ERROR] You must specify an e-mail address" >&2
+			exit 1
+		fi
+		echo ""
+		stty -echo
+		read -p "CA KEY PASSWORD: " capass; echo
+		stty echo
+		if [ -z "$capass" ]; then
+			echo "[ERROR] CA password has to be specified" >&2
+			exit 1
+		fi
+		echo ""
+
+		./bin/genservercert -C "$cname" -e "$email" -p "$capass"
+
+		mkdir -p $SCBASE/$cname
+		mv $cname.* $SCBASE/$cname/
+
+		chmod 0400 $SCBASE/$cname/$cname.key
+		if [ $? -ne 0 ]; then
+			echo "[WARNING] Failed to restrict access to server key" >&2
+		else
+			echo "Restrictive access to server key has been set"
+		fi
+		
+		echo "________________________________________________________________________________"
+		echo ""
+		echo " * Private key: $SCBASE/$cname/$cname.key"
+		echo " * Certificate: $SCBASE/$cname/$cname.crt"
+		echo ""
+		echo "The certificate and private key needs to be securely copied to the server and"
+    echo "installed there (not part of this instruction)."
+		echo ""
+
+	else
+		
+		# New client certificate	
+
+		echo ""
+		echo "The name of the client should be the name of the user. Only use characters a-z"
+		echo "(upper or lower case) and space in the name."
+    read -p "CLIENT NAME: " cname
+		if [ -z "$cname" ]; then
+			echo "[ERROR] Name must be specified" >&2
+			exit 1
+		fi
+		dname=`echo $cname | tr [:upper:] [:lower:] | tr -cd '[:alpha:] [:space:]' | sed 's/ /\./g'`
+		echo ""
+		echo "What is the e-mail address of the client?"
+    read -p "EMAIL: " email
+    if [ -z "$email" ]; then
+      echo "[ERROR] You must specify an e-mail address" >&2
+      exit 1
+    fi
+		echo ""
+    stty -echo
+    read -p "CA KEY PASSWORD: " capass; echo
+    stty echo
+    if [ -z "$capass" ]; then
+      echo "[ERROR] CA password has to be specified" >&2
+      exit 1
+    fi
+		echo ""
+
+		# Auto generating client's export password
+		xfile="$email.export.pwd"
+    $ossl rand -base64 6  | tr -d '\n'> $xfile
+    if [ `cat $xfile | wc -m` -eq 0 ]; then
+      echo "Failed to generate export password $xfile" >&2
+      exit 1
+    fi
+
+		./bin/genusercert -C "$cname" -e "$email" -x "`cat $xfile`" -p "$capass"
+
+		mkdir -p $CCBASE/$dname
+		mv $email.* $CCBASE/$dname/
+
+		chmod 0400 $CCBASE/$dname/$email.key
+		if [ $? -ne 0 ]; then
+			echo "[WARNING] Failed to restrict access to client key" >&2
+		else
+			echo "Restrictive access to client key has been set"
+		fi
+		
+		chmod 0400 $CCBASE/$dname/$xfile
+		if [ $? -ne 0 ]; then
+			echo "[WARNING] Failed to restrict access to export password" >&2
+		else
+			echo "Restrictive access to export password has been set"
+		fi
+		echo "________________________________________________________________________________"
+		echo ""
+		echo " * Private key: $CCBASE/$dname/$email.key"
+		echo " * Certificate: $CCBASE/$dname/$email.crt"
+		echo " * PKCS12 Cert: $CCBASE/$dname/$email.p12"
+		echo " * Export pass: $CCBASE/$dname/$xfile"
+		echo ""
+		echo "Both certificate files and the export password needs to be securely transferred"
+    echo "to the client."
+		echo ""
+
+	fi
+	exit 0
+}
+
+list() {
+
+	LTYPE=`echo $1 | tr [:upper:] [:lower:]`
+  if [ "$LTYPE" != "servers" -a "$LTYPE" != "clients" -a "$LTYPE" != "all" ]; then
+    echo -e "\n"$me" list { servers | clients | all } \n" >&2
+    exit 1
+  fi
+
+	if [ ! -r $CABASE/ca.db.index ]; then
+		echo "[ERROR] No index file found" >&2
+		exit 1
+	fi
+
+	S_ARRAY=()
+	C_ARRAY=()
+	UNKNOWN=()
+	while read line; do
+		unset cstatus expdate revdate serial dname
+		cn=`echo $line | cut -d"/" -f2 | cut -d"=" -f2`
+		if [ -d "$SCBASE/$cn" ]; then # this is a server cert
+			cstatus=`echo $line | awk '{print $1}'`
+			expdate=`echo $line | awk '{print $2}'`
+			i=3
+			var="$"$i
+			if [ "$cstatus" = "R" ]; then
+				revdate=`echo $line | awk "{print $var}"`
+				let "i+=1"
+				var="$"$i
+			fi
+			serial=`echo $line | awk "{print $var}"`
+			let "i+=2"
+			var="$"$i
+			dn=`echo $line | awk "{print $var}"`
+			S_ARRAY=( "${S_ARRAY[@]}" "$cstatus,$expdate,$revdate,$serial,$cn" )	
+		else
+			dname=`echo $cn | tr [:upper:] [:lower:] | tr -cd '[:alpha:] [:space:]' | sed 's/ /\./g'`
+			if [ -d "$CCBASE/$dname" ]; then # this is a client cert
+				cstatus=`echo $line | awk '{print $1}'`
+				expdate=`echo $line | awk '{print $2}'`
+				i=3
+				var="$"$i
+				if [ "$cstatus" = "R" ]; then
+					revdate=`echo $line | awk "{print $var}"`
+					let "i+=1"
+					var="$"$i
+				fi
+				serial=`echo $line | awk "{print $var}"`
+				let "i+=2"
+				var="$"$i
+				dn=`echo $line | awk "{print $var}"`
+				C_ARRAY=( "${C_ARRAY[@]}" "$cstatus,$expdate,$revdate,$serial,$dname" )
+			else
+				UNKNOWN=( "${UNKNOWN[@]}" "$line" )	
+			fi
+		fi
+	done < $CABASE/ca.db.index	
+
+	if [ "$LTYPE" = "all" ]; then
+		array=( ${S_ARRAY[@]} ${C_ARRAY[@]} )
+	elif [ "$LTYPE" = "servers" ]; then
+		array=( ${S_ARRAY[@]} )
+	else
+		array=( ${C_ARRAY[@]} )
+	fi
+
+	echo "+--------+---------+------------+------------+---------------------------------+"
+	echo "| Serial | Status  | Exp. Date  | Rev. Date  | Name                            |"
+	echo "+--------+---------+------------+------------+---------------------------------+"
+	for entry in "${array[@]}"; do
+		printf "| %-7s" "`echo $entry | cut -d, -f4`"
+		sflag=`echo $entry | cut -d, -f1`
+		if [ "$sflag" = "V" ]; then sname="Valid"; fi	
+		if [ "$sflag" = "R" ]; then sname="Revoked"; fi	
+		if [ "$sflag" = "E" ]; then sname="Expired"; fi	
+		printf "| %-8s" "$sname"
+		expdate=`echo $entry | cut -d, -f2`
+		expdate2="20"${expdate:0:2}"-"${expdate:2:2}"-"${expdate:4:2}
+		printf "| %-11s" "$expdate2"
+		revdate=`echo $entry | cut -d, -f3`
+		if [ -n "$revdate" ]; then
+			revdate2="20"${revdate:0:2}"-"${revdate:2:2}"-"${revdate:4:2}
+		else
+			revdate2=""
+		fi
+		printf "| %-11s" "$revdate2"
+		printf "| %-32s|" "`echo $entry | cut -d, -f5`"
+		printf "\n"
+	done
+	echo "+--------+---------+------------+------------+---------------------------------+"
+
+	if [ ${#UNKNOWN[@]} -gt 0 ]; then
+		echo ""
+		echo "[WARNING] Some entries in CA index could not be categorized!" >&2
+		echo "          This hould not happen if CA-admin is used for all administration work" >&2
+		for entry in "${UNKNOWN[@]}"; do
+			echo $entry
+		done
+	fi
+	exit 0
+}
+
+show() {
+	if [ ! -r "$1" ]; then
+		echo -e "\n"$me" show <path to .crt file> \n" >&2
+		exit 1
+	fi
+
+	$ossl x509 -in $1 -noout -text
+	if [ $? -ne 0 ]; then
+		echo "[ERROR] Openssl failed to display certificate details" >&2
+		exit 1
+	fi
+
+	$ossl x509 -in $1 -sha512 -noout -fingerprint
+	if [ $? -ne 0 ]; then
+		echo "[ERROR] Openssl failed to display fingerprint" >&2
+		exit 1
+	fi
+	$ossl x509 -in $1 -sha1 -noout -fingerprint
+	if [ $? -ne 0 ]; then
+		echo "[ERROR] Openssl failed to display fingerprint" >&2
+		exit 1
+	fi
+	exit 0	
+}
+
+revoke() {
+
+	cert="$CABASE/ca.db.certs/$1.pem"
+
+	if [ ! -r "$cert" ]; then
+		echo -e "\n"$me" revoke <serial>\n" >&2
+		exit 1
+	fi
+
+	echo ""
+	stty -echo
+	read -p "CA KEY PASSWORD: " capass; echo
+	stty echo
+	if [ -z "$capass" ]; then
+		echo "[ERROR] CA password has to be specified" >&2
+		exit 1
+	fi
+	echo ""
+
+	# Revoking the certificate
+	echo "Certificate: $cert"
+	$ossl x509 -in $cert -noout -subject
+	read -p "Are you sure you want to revoke this certificate (yes/NO)?: " answer
+	if [ "$answer" != "yes" ]; then
+		echo "Revocation terminated" >&2
+		exit 1
+	fi
+	echo ""
+
+	./bin/revokecert -p "$capass" -c "$cert"
+
+	# Update public CRL if available
+	$0 crl publish
+	if [ $? -ne 0 ]; then
+		echo "[WARNING] Failed to publish CRL" >&2
+	fi
+	echo ""
+	echo "Revocation complete"
+	echo ""
+	exit 0
+}
+
+crl() {
+	SUBC=`echo $1 | tr [:upper:] [:lower:]`
+  if [ "$SUBC" != "show" -a "$SUBC" != "generate" -a "$SUBC" != "publish" ]; then
+    echo -e "\n"$me" crl { show | generate | publish } \n" >&2
+    exit 1
+  fi
+
+	if [ "$SUBC" = "show" ]; then
+		if [ ! -e $CABASE/ca.crl ]; then
+			echo "[ERROR] CRL does not exist ($CABASE/ca.crl)" >&2
+			exit 1
+		fi
+		asciiver=$CABASE/ca.crl.txt
+		if [ -r $asciiver ]; then
+			cat $asciiver
+		else
+			openssl crl -text -noout -in $CABASE/ca.crl -out  $asciiver
+			if [ $? -ne 0 ]; then
+				echo "[ERROR] Openssl failed to create text version of CRL" >&2
+				exit 1
+			fi		
+			cat $asciiver
+		fi
+		if [ -r $CRL_PUB_PEM -o -r $CRL_PUB_DER ]; then
+			echo "CRL publicly installed in:"
+			if [ -r $CRL_PUB_PEM ]; then
+				echo " * $CRL_PUB_PEM"
+			fi
+			if [ -r $CRL_PUB_DER ]; then
+				echo " * $CRL_PUB_DER"
+			fi
+		fi
+		exit 0
+	fi
+
+	if [ "$SUBC" = "generate" ]; then
+	
+		tmpconf
+
+		echo ""
+		stty -echo
+		read -p "CA KEY PASSWORD: " capass; echo
+		stty echo
+		if [ -z "$capass" ]; then
+			echo "[ERROR] CA password has to be specified" >&2
+			exit 1
+		fi
+		echo ""
+
+		openssl ca -config ca.config -passin "pass:$capass" -gencrl -crldays $CRL_VALID -out $CABASE/ca.crl
+		if [ $? -ne 0 ]; then
+			echo "[ERROR] Openssl failed to create CRL" >&2
+			rmconf
+			exit 1
+		else
+			echo "CRL created $CABASE/ca.crl"
+			rmconf
+		fi
+
+		openssl crl -in $CABASE/ca.crl -outform DER -out $CABASE/ca.crl.der
+		if [ $? -ne 0 ]; then
+			echo "[ERROR] Openssl failed to create DER formatted CRL" >&2
+			exit 1
+		fi
+
+		openssl crl -text -noout -in $CABASE/ca.crl -out $CABASE/ca.crl.txt
+		if [ $? -ne 0 ]; then
+    	echo "[WARNING] Openssl failed to create text version of CRL" >&2
+			exit 1
+		fi
+		exit 0
+	fi
+
+	if [ "$SUBC" = "publish" ]; then
+		if [ "$CRL_PUB_DER" != "" -o "$CRL_PUB_PEM" != "" ]; then
+			if [ -n "$CRL_PUB_DER" ]; then
+				cp $CABASE/ca.crl.der $CRL_PUB_DER
+				if [ $? -ne 0 ]; then
+					echo "[ERROR] Failed to copy $CABASE/ca.crl.der to $CRL_PUB_DER" >&2
+				else
+					chmod 644 $CRL_PUB_DER
+					echo "Public CRL ($CRL_PUB_DER) has been updated"
+				fi
+			fi
+			if [ -n "$CRL_PUB_PEM" ]; then
+				cp $CABASE/ca.crl $CRL_PUB_PEM
+				if [ $? -ne 0 ]; then
+					echo "[ERROR] Failed to copy $CABASE/ca.crl to $CRL_PUB_PEM" >&2
+				else
+					chmod 644 $CRL_PUB_PEM
+					echo "Public CRL ($CRL_PUB_PEM) has been updated"
+				fi
+			fi
+		else
+			echo "[WARNING] No public CRL paths defined in config" >&2
+			exit 1
+		fi
+		exit 0
+	fi
+}
+
+case $1 in
+	"init")	
+					init
+					;;
+	"new")
+					newcert $2
+					;;
+	"revoke")
+					revoke $2					
+					;;	
+	"list")
+					list $2
+					;;
+	"show")
+					show $2
+					;;
+	"crl")
+					crl $2
+					;;
+	*)
+					printusage
+					;;
+esac
