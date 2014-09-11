@@ -30,10 +30,10 @@ Commands:
             ascii contents of current CRL), generate (create an updated CRL), 
             publish (copy CRL to CRL_PUB_{DER|PEM} as specified in etc/config).
 
---------------------------------------------------------------------------------
+Notes
+-----
 
 Configuration file located in `./etc/config`.
 
-NOTE: Do not modify any of the files in the `CABASE` directory manually, files like the 
-      the index are very fragile.
+Do not modify any of the files in the `CABASE` directory manually, files like the index are very fragile.
 
