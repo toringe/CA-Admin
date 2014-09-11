@@ -13,21 +13,22 @@ Usage
 Commands:
 
  `init`   - Initialize the Certificate Authority by creating key, cert, directory 
-          structure, index and serial files.
+            structure, index and serial files.
+            
 
- new    - Create new certificate. This command has two sub-commands: server (for
-          generating a server certificate) and client (client certificate).
+ `new`    - Create new certificate. This command has two sub-commands: server (for
+            generating a server certificate) and client (client certificate).
 
- list   - List certificates issued by this CA. Use sub-command to display 
-          servers, clients or all certificates.
+ `list`   - List certificates issued by this CA. Use sub-command to display 
+            servers, clients or all certificates.
 
- show   - Display details for given certificate.
+ `show`   - Display details for given certificate.
 
- revoke - Revoke a certificate and update the CRL.
+ `revoke` - Revoke a certificate and update the CRL.
 
- crl    - Certificate Revocation List (CRL) specific sub-commands: show (display
-          ascii contents of current CRL), generate (create an updated CRL), 
-          publish (copy CRL to CRL_PUB_{DER|PEM} as specified in etc/config).
+ `crl`    - Certificate Revocation List (CRL) specific sub-commands: show (display
+            ascii contents of current CRL), generate (create an updated CRL), 
+            publish (copy CRL to CRL_PUB_{DER|PEM} as specified in etc/config).
 
 --------------------------------------------------------------------------------
 
