@@ -32,8 +32,8 @@ Commands:
 
 --------------------------------------------------------------------------------
 
-Configuration file located in ./etc/config.
+Configuration file located in `./etc/config`.
 
-NOTE: Do not modify any of the files in the ./ca directory manually, files like the 
+NOTE: Do not modify any of the files in the `CABASE` directory manually, files like the 
       the index are very fragile.
 
