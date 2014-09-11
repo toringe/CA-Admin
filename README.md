@@ -6,11 +6,13 @@ administration of setting up and maintaining a certificate authority.
 
 Use the CA-admin script for all certificate administration.
 
-Usage: CA-admin <command>
---------------------------------------------------------------------------------
+Usage 
+-----
+    CA-admin <command>
+
 Commands:
 
- init   - Initialize the Certificate Authority by creating key, cert, directory 
+ `init`   - Initialize the Certificate Authority by creating key, cert, directory 
           structure, index and serial files.
 
  new    - Create new certificate. This command has two sub-commands: server (for
