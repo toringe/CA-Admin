@@ -1,0 +1,52 @@
+#!/bin/bash
+################################################################################
+# Certificate Authority Administration Configuration File
+################################################################################
+
+# Absolute path to CA hierarchy (this location should be well protected)
+# This directory contains all the root-CA data.
+CABASE="/root/CA/ca"
+
+# CA Country (ISO-3166-1 alpha-2)
+CA_C="NO"
+
+# CA state/province
+CA_ST="Oslo"
+
+# CA locality/city
+CA_L="Oslo"
+
+# CA Organization name
+CA_O="Example Corp"
+
+# CA Organizational unit
+CA_OU="Division A"
+
+# CA Administrative contact (e-mail)
+CA_E="admin@example.com"
+
+# CA Common name
+CA_CN="Example CA"
+
+# CA Validity (10 years = 3650 days)
+CA_VALID=3650
+
+# Server certificates directory
+SCBASE="/root/CA/servers"
+
+# Validity of server certificates (5 years = 1825 days)
+SC_VALID=1825
+
+# Client certificates directory
+CCBASE="/root/CA/clients"
+
+# Validity for client certificates (2 years = 730 days)
+CC_VALID=730
+
+# Number of days before the next CRL is due. That is the days from now to place
+# in the CRL nextUpdate field. 
+CRL_VALID=30
+
+# Path to publicly available CRL, in both DER and PEM format. (Set to "" to disable this option)
+CRL_PUB_DER=""
+CRL_PUB_PEM=""
